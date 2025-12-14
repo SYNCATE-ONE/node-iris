@@ -5,9 +5,9 @@ node-iris는 Python으로 작성된 [irispy-client](https://github.com/dolidolih
 ## 설치
 
 ```bash
-npm install @tsuki-chat/node-iris
+npm install @syncate-core/node-iris
 # 또는
-pnpm install @tsuki-chat/node-iris
+pnpm install @syncate-core/node-iris
 ```
 
 ## 설정
@@ -36,7 +36,7 @@ KAKAOLINK_ORIGIN=your_origin
 ### 봇 생성 및 실행
 
 ```typescript
-import { Bot, ChatContext } from '@tsuki-chat/node-iris';
+import { Bot, ChatContext } from '@syncate-core/node-iris';
 
 const bot = new Bot('BotName', process.env.IRIS_URL, { maxWorkers: 4 });
 
@@ -70,7 +70,7 @@ import {
   MessageController,
   BotCommand,
   ChatContext,
-} from '@tsuki-chat/node-iris';
+} from '@syncate-core/node-iris';
 
 @MessageController
 export default class MyMessageController {
@@ -163,7 +163,7 @@ import {
   Schedule,
   ScheduleMessage,
   Bootstrap,
-} from '@tsuki-chat/node-iris';
+} from '@syncate-core/node-iris';
 
 @BatchController
 export default class MyBatchController {
@@ -190,7 +190,7 @@ export default class MyBatchController {
 ### 데코레이터 사용 (함수형)
 
 ```typescript
-import { decorators } from '@tsuki-chat/node-iris';
+import { decorators } from '@syncate-core/node-iris';
 
 // 파라미터가 있는 경우에만 실행
 const echoHandler = decorators.hasParam(async (context: ChatContext) => {
@@ -248,7 +248,7 @@ import {
   KakaoLinkReceiverNotFoundException,
   KakaoLinkLoginException,
   KakaoLinkSendException,
-} from '@tsuki-chat/node-iris';
+} from '@syncate-core/node-iris';
 
 const link = new IrisLink(
   process.env.IRIS_URL,
@@ -307,7 +307,7 @@ interface BotOptions {
 배치 작업과 메시지 스케줄링을 관리하는 싱글톤 클래스입니다.
 
 ```typescript
-import { BatchScheduler } from '@tsuki-chat/node-iris';
+import { BatchScheduler } from '@syncate-core/node-iris';
 
 const scheduler = BatchScheduler.getInstance();
 
@@ -326,7 +326,7 @@ scheduler.scheduleMessage(
 통합 로깅 시스템을 제공합니다.
 
 ```typescript
-import { Logger, LogLevel, defaultLogger } from '@tsuki-chat/node-iris';
+import { Logger, LogLevel, defaultLogger } from '@syncate-core/node-iris';
 
 // 커스텀 로거 생성
 const logger = new Logger(LogLevel.DEBUG);
@@ -341,7 +341,7 @@ defaultLogger.error('에러 메시지');
 환경 설정을 관리하는 클래스입니다.
 
 ```typescript
-import { Config } from '@tsuki-chat/node-iris';
+import { Config } from '@syncate-core/node-iris';
 
 const config = new Config();
 const irisUrl = config.get('IRIS_URL');
@@ -352,7 +352,7 @@ const irisUrl = config.get('IRIS_URL');
 이벤트 기반 프로그래밍을 위한 유틸리티입니다.
 
 ```typescript
-import { EventEmitter } from '@tsuki-chat/node-iris';
+import { EventEmitter } from '@syncate-core/node-iris';
 
 const emitter = new EventEmitter();
 emitter.on('custom-event', (data) => {
@@ -473,7 +473,7 @@ new IrisLink(
 모든 컨트롤러의 기본 클래스입니다.
 
 ```typescript
-import { BaseController, Logger } from '@tsuki-chat/node-iris';
+import { BaseController, Logger } from '@syncate-core/node-iris';
 
 export default class MyController extends BaseController {
   protected logger: Logger;
