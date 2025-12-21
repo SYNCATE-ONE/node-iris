@@ -1,5 +1,6 @@
 /**
  * Refactored Bot class using manager pattern
+ * 다중 WebSocket 연결 및 메시지 큐 지원
  */
 
 import { BaseController } from '@/controllers/BaseController';
@@ -10,12 +11,18 @@ import {
 } from '@/services/core/BatchScheduler';
 import { IrisAPI } from '@/services/core/IrisAPI';
 import { IrisRequest } from '@/types/models/base';
-import { EventEmitter } from '@/utils/event-emitter';
+import { EventEmitter, EventEmitterOptions } from '@/utils/event-emitter';
 import { Logger } from '@/utils/logger';
+import { AsyncMessageQueue, MessageQueueOptions } from './AsyncMessageQueue';
 import { ConnectionManager } from './ConnectionManager';
 import { ControllerManager } from './ControllerManager';
 import { EventManager } from './EventManager';
 import { MessageProcessor } from './MessageProcessor';
+import {
+  MultiConnectionManager,
+  ConnectionConfig,
+  MultiConnectionManagerOptions,
+} from './MultiConnectionManager';
 import { WebhookManager } from './WebhookManager';
 
 export type EventHandler = (context: any) => void | Promise<void>;
@@ -29,6 +36,19 @@ export interface BotOptions {
   webhookPort?: number; // 웹훅 서버 포트 (기본: 3001)
   webhookPath?: string; // 웹훅 엔드포인트 경로 (기본: /webhook/message)
   logLevel?: 'error' | 'warn' | 'info' | 'debug'; // 로그 레벨 설정
+
+  // 다중 연결 옵션
+  multiConnection?: boolean; // 다중 연결 모드 활성화
+  connections?: ConnectionConfig[]; // 연결 설정 목록
+  connectionOptions?: MultiConnectionManagerOptions; // 연결 관리자 옵션
+
+  // 메시지 큐 옵션
+  useMessageQueue?: boolean; // 메시지 큐 사용 여부
+  messageQueueOptions?: MessageQueueOptions; // 메시지 큐 옵션
+
+  // 이벤트 처리 옵션
+  parallelEventHandling?: boolean; // 이벤트 핸들러 병렬 실행 여부
+  eventTimeout?: number; // 이벤트 핸들러 타임아웃 (ms)
 }
 
 export class Bot {
@@ -44,14 +64,18 @@ export class Bot {
 
   // Managers
   private connectionManager!: ConnectionManager;
+  private multiConnectionManager?: MultiConnectionManager;
   private webhookManager!: WebhookManager;
   private eventManager!: EventManager;
   private controllerManager!: ControllerManager;
   private messageProcessor!: MessageProcessor;
   private batchScheduler!: BatchScheduler;
+  private messageQueue?: AsyncMessageQueue;
 
   // Configuration
   private httpMode: boolean;
+  private multiConnectionMode: boolean;
+  private useMessageQueue: boolean;
   private emitter: EventEmitter;
 
   /**
@@ -70,7 +94,14 @@ export class Bot {
 
   constructor(name: string, irisUrl: string, options: BotOptions = {}) {
     this.name = name;
-    this.emitter = new EventEmitter(options.maxWorkers);
+
+    // EventEmitter 옵션 설정
+    const emitterOptions: EventEmitterOptions = {
+      maxWorkers: options.maxWorkers,
+      parallelExecution: options.parallelEventHandling ?? true,
+      timeout: options.eventTimeout ?? 30000,
+    };
+    this.emitter = new EventEmitter(emitterOptions);
 
     // EventEmitter 메모리 누수 방지를 위해 maxListeners 증가
     process.setMaxListeners(20);
@@ -96,6 +127,12 @@ export class Bot {
 
     // HTTP 웹훅 모드 설정
     this.httpMode = options.httpMode || false;
+
+    // 다중 연결 모드 설정
+    this.multiConnectionMode = options.multiConnection || false;
+
+    // 메시지 큐 사용 여부 (기본: true)
+    this.useMessageQueue = options.useMessageQueue ?? true;
 
     // Clean up the URL similar to Python implementation
     this.irisUrl = irisUrl
@@ -138,12 +175,43 @@ export class Bot {
       { autoRegisterControllers: options.autoRegisterControllers }
     );
 
-    // Initialize ConnectionManager
+    // Initialize ConnectionManager (단일 연결용)
     this.connectionManager = new ConnectionManager(
       this.irisUrl,
       this.api,
       this.logger
     );
+
+    // Initialize MultiConnectionManager (다중 연결용)
+    if (this.multiConnectionMode) {
+      this.multiConnectionManager = new MultiConnectionManager(
+        this.logger,
+        options.connectionOptions
+      );
+
+      // 기본 연결 추가
+      this.multiConnectionManager.addConnection({
+        id: 'default',
+        url: this.irisUrl,
+      });
+
+      // 추가 연결 설정이 있으면 추가
+      if (options.connections) {
+        this.multiConnectionManager.addConnections(options.connections);
+      }
+    }
+
+    // Initialize MessageQueue (메시지 큐)
+    if (this.useMessageQueue) {
+      this.messageQueue = new AsyncMessageQueue(this.logger, {
+        maxConcurrent: options.messageQueueOptions?.maxConcurrent ?? 10,
+        maxQueueSize: options.messageQueueOptions?.maxQueueSize ?? 1000,
+        maxRetries: options.messageQueueOptions?.maxRetries ?? 3,
+        processingTimeout:
+          options.messageQueueOptions?.processingTimeout ?? 30000,
+        ...options.messageQueueOptions,
+      });
+    }
 
     // Initialize WebhookManager
     this.webhookManager = new WebhookManager(this.name, this.logger, {
@@ -153,21 +221,86 @@ export class Bot {
 
     // Set up message handlers
     this.setupMessageHandlers();
+
+    // Set up API resolver for multi-connection support
+    this.setupApiResolver();
+  }
+
+  /**
+   * Setup API resolver for multi-connection support
+   * This allows MessageProcessor to route responses to the correct connection
+   */
+  private setupApiResolver(): void {
+    this.messageProcessor.setApiResolver((connectionId: string) => {
+      // webhook 연결인 경우 기본 API 사용
+      if (connectionId === 'webhook') {
+        return this.api;
+      }
+
+      // 다중 연결 모드인 경우 해당 연결의 API 반환
+      if (this.multiConnectionManager) {
+        const api = this.multiConnectionManager.getApi(connectionId);
+        if (api) return api;
+      }
+
+      // 기본 API 반환
+      return this.api;
+    });
   }
 
   /**
    * Setup message handlers for managers
    */
   private setupMessageHandlers(): void {
-    // Setup message handler for connection manager
-    this.connectionManager.setMessageHandler(async (data: IrisRequest) => {
+    // 공통 메시지 처리 함수
+    const processMessage = async (data: IrisRequest, connectionId?: string) => {
+      // 연결 ID를 데이터에 추가 (다중 연결 시 식별용)
+      if (connectionId) {
+        (data as any)._connectionId = connectionId;
+      }
       await this.messageProcessor.processIrisRequest(data);
-    });
+    };
 
-    // Setup message handler for webhook manager
-    this.webhookManager.setMessageHandler(async (data: IrisRequest) => {
-      await this.messageProcessor.processIrisRequest(data);
-    });
+    // 메시지 큐 사용 시
+    if (this.messageQueue) {
+      this.messageQueue.setMessageHandler(processMessage);
+
+      // 큐에 메시지 추가하는 핸들러
+      const queueMessage = async (
+        data: IrisRequest,
+        connectionId: string = 'default'
+      ) => {
+        this.messageQueue!.enqueue(data, connectionId);
+      };
+
+      // Setup message handler for connection manager
+      this.connectionManager.setMessageHandler(async (data: IrisRequest) => {
+        await queueMessage(data, 'default');
+      });
+
+      // Setup message handler for multi-connection manager
+      if (this.multiConnectionManager) {
+        this.multiConnectionManager.setMessageHandler(queueMessage);
+      }
+
+      // Setup message handler for webhook manager
+      this.webhookManager.setMessageHandler(async (data: IrisRequest) => {
+        await queueMessage(data, 'webhook');
+      });
+    } else {
+      // 메시지 큐 미사용 시 직접 처리
+      this.connectionManager.setMessageHandler(async (data: IrisRequest) => {
+        await processMessage(data, 'default');
+      });
+
+      if (this.multiConnectionManager) {
+        this.multiConnectionManager.setMessageHandler(processMessage);
+      }
+
+      this.webhookManager.setMessageHandler(async (data: IrisRequest) => {
+        await processMessage(data, 'webhook');
+      });
+    }
   }
 
   /**
@@ -268,6 +401,12 @@ export class Bot {
     this.batchScheduler.start();
     this.logger.info('Batch scheduler started');
 
+    // Start message queue if enabled
+    if (this.messageQueue) {
+      this.messageQueue.start();
+      this.logger.info('Message queue started');
+    }
+
     // Set up scheduled message handler
     this.batchScheduler.onScheduledMessage(
       async (scheduledMessage: ScheduledMessage) => {
@@ -290,12 +429,18 @@ export class Bot {
       this.logger.info('Starting in HTTP webhook mode');
 
       // Initialize bot info
-      await this.connectionManager.initializeBotInfo();
-
-      // Set bot ID for message processor
-      const botId = this.connectionManager.getBotId();
-      if (botId) {
-        this.messageProcessor.setBotId(botId);
+      if (this.multiConnectionMode && this.multiConnectionManager) {
+        await this.multiConnectionManager.initializeBotInfo();
+        const botId = this.multiConnectionManager.getBotId();
+        if (botId) {
+          this.messageProcessor.setBotId(botId);
+        }
+      } else {
+        await this.connectionManager.initializeBotInfo();
+        const botId = this.connectionManager.getBotId();
+        if (botId) {
+          this.messageProcessor.setBotId(botId);
+        }
       }
 
       // Start webhook server
@@ -305,7 +450,27 @@ export class Bot {
       return this.webhookManager.keepAlive();
     }
 
-    // WebSocket 모드 (기본)
+    // 다중 연결 모드인 경우
+    if (this.multiConnectionMode && this.multiConnectionManager) {
+      this.logger.info('Starting in Multi-WebSocket mode');
+
+      // 모든 연결 시작
+      await this.multiConnectionManager.connectAll();
+
+      // 봇 ID 설정
+      const botId = this.multiConnectionManager.getBotId();
+      if (botId) {
+        this.messageProcessor.setBotId(botId);
+      }
+
+      // 연결 상태 주기적 로깅
+      this.logConnectionStats();
+
+      // Keep process alive
+      return new Promise(() => {});
+    }
+
+    // WebSocket 모드 (기본 - 단일 연결)
     this.logger.info('Starting in WebSocket mode');
 
     // Set bot ID for message processor when connection is established
@@ -319,19 +484,91 @@ export class Bot {
   }
 
   /**
+   * 연결 상태 주기적 로깅
+   */
+  private logConnectionStats(): void {
+    setInterval(() => {
+      if (this.multiConnectionManager) {
+        const stats = this.multiConnectionManager.getStats();
+        this.logger.debug('Connection stats', stats);
+      }
+      if (this.messageQueue) {
+        const queueStats = this.messageQueue.getStats();
+        this.logger.debug('Message queue stats', queueStats);
+      }
+    }, 60000); // 1분마다
+  }
+
+  /**
+   * 추가 Iris 서버 연결 추가 (런타임)
+   */
+  addConnection(config: ConnectionConfig): void {
+    if (!this.multiConnectionManager) {
+      this.logger.warn(
+        'Multi-connection mode is not enabled. Enable it with multiConnection: true option.'
+      );
+      return;
+    }
+    this.multiConnectionManager.addConnection(config);
+  }
+
+  /**
+   * 연결 통계 가져오기
+   */
+  getConnectionStats(): {
+    total: number;
+    connected: number;
+    disconnected: number;
+    error: number;
+    totalMessages: number;
+  } | null {
+    if (this.multiConnectionManager) {
+      return this.multiConnectionManager.getStats();
+    }
+    return null;
+  }
+
+  /**
+   * 메시지 큐 통계 가져오기
+   */
+  getQueueStats(): {
+    queued: number;
+    processing: number;
+    completed: number;
+    failed: number;
+    dropped: number;
+    avgProcessingTime: number;
+  } | null {
+    if (this.messageQueue) {
+      return this.messageQueue.getStats();
+    }
+    return null;
+  }
+
+  /**
    * Stop the bot
    */
   stop(): void {
     // Stop batch scheduler
     this.batchScheduler.stop();
 
+    // Stop message queue
+    if (this.messageQueue) {
+      this.messageQueue.stop();
+    }
+
     // Close connections
     this.connectionManager.close();
+    if (this.multiConnectionManager) {
+      this.multiConnectionManager.close();
+    }
     this.webhookManager.stop();
 
     // Clear static instance
     if (Bot.instance === this) {
       Bot.instance = null;
     }
+
+    this.logger.info('Bot stopped');
   }
 }

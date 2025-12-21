@@ -284,18 +284,26 @@ export class ChatContext {
   public raw: IrisRawData;
   public api: IIrisAPI;
 
+  /**
+   * Connection ID for multi-connection support
+   * Identifies which WebSocket connection this message came from
+   */
+  public connectionId?: string;
+
   constructor(
     room: Room,
     sender: User,
     message: Message,
     raw: IrisRawData,
-    api: IIrisAPI
+    api: IIrisAPI,
+    connectionId?: string
   ) {
     this.room = room;
     this.sender = sender;
     this.message = message;
     this.raw = raw;
     this.api = api;
+    this.connectionId = connectionId;
   }
 
   async reply(message: string, roomId?: string | number): Promise<void> {

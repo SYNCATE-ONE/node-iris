@@ -1,5 +1,6 @@
 /**
  * node-iris - TypeScript port of Python irispy-client module
+ * 다중 WebSocket 연결 및 메시지 큐 지원
  */
 
 // Main classes
@@ -16,6 +17,21 @@ export {
   KakaoLinkSendException,
 } from './services/core/IrisLink';
 export { defaultLogger, Logger, LogLevel } from './utils/logger';
+
+// Multi-connection and Message Queue
+export { MultiConnectionManager } from './services/bot/MultiConnectionManager';
+export { AsyncMessageQueue } from './services/bot/AsyncMessageQueue';
+export type {
+  ConnectionConfig,
+  ConnectionState,
+  MultiConnectionManagerOptions,
+} from './services/bot/MultiConnectionManager';
+export type {
+  QueuedMessage,
+  MessageQueueOptions,
+  MessageQueueStats,
+} from './services/bot/AsyncMessageQueue';
+export type { ApiResolver } from './services/bot/MessageProcessor';
 
 // Alias for compatibility with Python irispy-client module
 export {
@@ -123,6 +139,7 @@ export {
 // Utils
 export { Config } from './utils/config';
 export { EventEmitter } from './utils/event-emitter';
+export type { EventEmitterOptions } from './utils/event-emitter';
 
 // Types
 export type {
@@ -132,7 +149,7 @@ export type {
 } from './services/bot/Bot';
 
 // Version
-export const version = '1.6.44';
+export const version = '1.6.54';
 export const irispy_client_version = '0.1.6';
 
 // Default export is the Bot class for convenience

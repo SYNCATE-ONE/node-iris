@@ -48,6 +48,10 @@ export const decoratorMetadata = new Map<
     hasDecorators: boolean;
     isMessageHandler?: boolean;
     allowedRooms?: string[];
+    roleValidator?:
+      | string[]
+      | ((context: ChatContext) => Promise<boolean> | boolean);
+    roleLabel?: string;
   }
 >();
 

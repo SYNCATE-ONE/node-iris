@@ -1,6 +1,6 @@
 {
-  "name": "@tsuki-chat/node-iris",
-  "version": "1.6.45",
+  "name": "@syncate-core/node-iris",
+  "version": "1.6.54",
   "description": "TypeScript port of Python irispy-client module for KakaoTalk bot development",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,11 +24,11 @@
     "chat",
     "messaging"
   ],
-  "author": "Tsuki-Chat",
+  "author": "SYNCATE-CORE",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Tsuki-Chat/node-iris.git"
+    "url": "https://github.com/SYNCATE-CORE/node-iris.git"
   },
   "files": [
     "dist/**/*.js",

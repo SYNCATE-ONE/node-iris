@@ -36,7 +36,10 @@ export function Command(
 /**
  * Decorator for bot commands with automatic command matching
  */
-export function BotCommand(commands: string | string[], description?: string) {
+export function BotCommand(
+  commands: string | string[],
+  descriptionOrOptions?: string | { description?: string; category?: string }
+) {
   return function (
     target: any,
     propertyKey: string,
@@ -46,6 +49,17 @@ export function BotCommand(commands: string | string[], description?: string) {
 
     // Normalize commands to array
     const commandArray = Array.isArray(commands) ? commands : [commands];
+
+    // Parse description and category from options
+    let description: string | undefined;
+    let category: string | undefined;
+
+    if (typeof descriptionOrOptions === 'string') {
+      description = descriptionOrOptions;
+    } else if (descriptionOrOptions) {
+      description = descriptionOrOptions.description;
+      category = descriptionOrOptions.category;
+    }
 
     // Store metadata for controller scanning
     const metadata = decoratorMetadata.get(originalMethod) || {
@@ -66,9 +80,11 @@ export function BotCommand(commands: string | string[], description?: string) {
       commandRegistry.set(command, {
         method: propertyKey,
         target: target.constructor.name,
+        targetConstructor: target.constructor, // Store actual controller constructor for prefix lookup
         originalCommand: command,
         originalMethod: originalMethod,
         description: description,
+        category: category, // Store category for command registration
         allCommands: commandArray, // Store all alternative commands
       });
     }
@@ -80,7 +96,7 @@ export function BotCommand(commands: string | string[], description?: string) {
 /**
  * Decorator for help commands that automatically generates help text from registered commands
  */
-export function HelpCommand(command: string) {
+export function HelpCommand(commands: string | string[]) {
   return function (
     target: any,
     propertyKey: string,
@@ -114,6 +130,7 @@ export function HelpCommand(command: string) {
             description: commandInfo.description || '설명 없음',
             originalMethod: commandInfo.originalMethod,
             target: commandInfo.target,
+            targetConstructor: commandInfo.targetConstructor, // Store actual controller constructor
           });
         }
 
@@ -123,10 +140,54 @@ export function HelpCommand(command: string) {
       // Collect all command groups and sort them
       const allCommandGroups: any[] = [];
       for (const [methodKey, groupInfo] of commandGroups) {
+        // Check if command has HasRole validator
+        const roleValidator = (groupInfo.originalMethod as any).__roleValidator;
+        const customRoleLabel = (groupInfo.originalMethod as any).__roleLabel;
+
+        let roleLabels: string[] | null = null;
+
+        // If HasRole is applied, check if user passes validation
+        if (roleValidator) {
+          let isAllowed = false;
+
+          if (typeof roleValidator === 'function') {
+            // Custom validator function
+            isAllowed = await roleValidator(context);
+          } else if (Array.isArray(roleValidator)) {
+            // Role array validator
+            const userType = await context.sender.getType();
+            isAllowed = !!(userType && roleValidator.includes(userType));
+          }
+
+          // Skip this command if validation fails
+          if (!isAllowed) {
+            continue;
+          }
+
+          // Generate role labels for commands that passed validation
+          if (typeof roleValidator === 'function') {
+            // Custom validator - use custom label if provided
+            if (customRoleLabel) {
+              roleLabels = [customRoleLabel];
+            }
+          } else if (Array.isArray(roleValidator)) {
+            // Role array - convert to Korean labels
+            const roleMap: Record<string, string> = {
+              HOST: '방장',
+              MANAGER: '부방장',
+              NORMAL: '멤버',
+            };
+
+            roleLabels = roleValidator
+              .map((role: string) => roleMap[role] || role)
+              .filter((label): label is string => label !== undefined);
+          }
+        }
+
         // Get full commands with prefix for this controller
         const fullCommands = groupInfo.commands.map((baseCommand: string) =>
           getFullCommand(
-            target.constructor,
+            groupInfo.targetConstructor || target.constructor, // Use actual controller constructor
             groupInfo.originalMethod,
             baseCommand
           )
@@ -139,6 +200,7 @@ export function HelpCommand(command: string) {
           fullCommands,
           description: groupInfo.description,
           primaryCommand: fullCommands[0], // Use first command for sorting
+          roleLabels, // Add role labels for display
         });
       }
 
@@ -156,7 +218,13 @@ export function HelpCommand(command: string) {
           // Multiple commands - show alternatives
           helpLines.push(`${group.fullCommands.join(' | ')}`);
         }
-        helpLines.push(` ⌊ ${group.description}`);
+
+        // Add description with role labels if available
+        let descriptionLine = ` ⌊ ${group.description}`;
+        if (group.roleLabels && group.roleLabels.length > 0) {
+          descriptionLine += ` [${group.roleLabels.join(', ')} 전용]`;
+        }
+        helpLines.push(descriptionLine);
         helpLines.push('');
       }
 
@@ -174,25 +242,30 @@ export function HelpCommand(command: string) {
       await context.reply(helpText);
     };
 
+    // Normalize commands to array
+    const commandArray = Array.isArray(commands) ? commands : [commands];
+
     // Store metadata for controller scanning
     const metadata = decoratorMetadata.get(originalMethod) || {
       commands: [],
       hasDecorators: false,
     };
 
-    // Store the original command without prefix for metadata
-    metadata.commands.push(command);
+    // Store all commands in metadata
+    metadata.commands.push(...commandArray);
     metadata.hasDecorators = true;
     decoratorMetadata.set(originalMethod, metadata);
 
-    // Register help command
-    commandRegistry.set(command, {
-      method: propertyKey,
-      target: target.constructor.name,
-      originalCommand: command,
-      originalMethod: originalMethod,
-      description: '도움말 표시',
-    });
+    // Register each help command
+    for (const command of commandArray) {
+      commandRegistry.set(command, {
+        method: propertyKey,
+        target: target.constructor.name,
+        originalCommand: command,
+        originalMethod: originalMethod,
+        description: '도움말 표시',
+      });
+    }
 
     return descriptor;
   };

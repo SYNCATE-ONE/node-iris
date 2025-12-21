@@ -49,15 +49,25 @@ export function IsReply(
 }
 
 /**
- * Decorator that only executes if user has specific roles
- * @param allowedRoles - 허용된 역할 배열
- * @param callback - 권한이 없을 때 실행될 콜백 함수
+ * Decorator that only executes if user has specific roles or passes custom validation
+ * @param allowedRolesOrValidator - 허용된 역할 배열 또는 커스텀 검증 함수
+ * @param callbackOrLabel - 권한이 없을 때 실행될 콜백 함수 또는 커스텀 검증 함수의 레이블 텍스트
+ * @param callback - 권한이 없을 때 실행될 콜백 함수 (커스텀 레이블 사용 시)
  */
 export function HasRole(
-  allowedRoles: string[],
+  allowedRolesOrValidator:
+    | string[]
+    | ((context: ChatContext) => Promise<boolean> | boolean),
+  callbackOrLabel?:
+    | string
+    | ((
+        context: ChatContext,
+        allowedRoles: string[] | undefined,
+        userRole: string | null
+      ) => Promise<void>),
   callback?: (
     context: ChatContext,
-    allowedRoles: string[],
+    allowedRoles: string[] | undefined,
     userRole: string | null
   ) => Promise<void>
 ) {
@@ -68,12 +78,38 @@ export function HasRole(
   ) {
     const originalMethod = descriptor.value;
 
-    descriptor.value = async function (context: ChatContext) {
+    // Parse parameters based on types
+    let actualCallback: typeof callback | undefined;
+    let customLabel: string | undefined;
+
+    if (typeof callbackOrLabel === 'string') {
+      // Second parameter is a label, third parameter is callback
+      customLabel = callbackOrLabel;
+      actualCallback = callback;
+    } else if (typeof callbackOrLabel === 'function') {
+      // Second parameter is a callback
+      actualCallback = callbackOrLabel as typeof callback;
+    }
+
+    const wrappedMethod = async function (this: any, context: ChatContext) {
+      let isAllowed = false;
       const userType = await context.sender.getType();
 
-      if (!userType || !allowedRoles.includes(userType)) {
-        if (callback) {
-          await callback(context, allowedRoles, userType);
+      // 커스텀 검증 함수인 경우
+      if (typeof allowedRolesOrValidator === 'function') {
+        isAllowed = await allowedRolesOrValidator(context);
+      }
+      // 역할 배열인 경우
+      else if (Array.isArray(allowedRolesOrValidator)) {
+        isAllowed = !!(userType && allowedRolesOrValidator.includes(userType));
+      }
+
+      if (!isAllowed) {
+        if (actualCallback) {
+          const allowedRoles = Array.isArray(allowedRolesOrValidator)
+            ? allowedRolesOrValidator
+            : undefined;
+          await actualCallback(context, allowedRoles, userType);
           return;
         }
         // 콜백이 없으면 기존 동작 유지 (아무것도 하지 않음)
@@ -82,6 +118,31 @@ export function HasRole(
 
       return originalMethod.call(this, context);
     };
+
+    // Store role validator in metadata for HelpCommand filtering
+    const existingMetadata = decoratorMetadata.get(originalMethod) || {
+      commands: [],
+      hasDecorators: false,
+    };
+    decoratorMetadata.set(originalMethod, {
+      ...existingMetadata,
+      roleValidator: allowedRolesOrValidator,
+      roleLabel: customLabel,
+    });
+
+    // Store in original method property
+    (originalMethod as any).__roleValidator = allowedRolesOrValidator;
+    if (customLabel) {
+      (originalMethod as any).__roleLabel = customLabel;
+    }
+
+    // CRITICAL: Also store in wrapped method so BotCommand can access it
+    (wrappedMethod as any).__roleValidator = allowedRolesOrValidator;
+    if (customLabel) {
+      (wrappedMethod as any).__roleLabel = customLabel;
+    }
+
+    descriptor.value = wrappedMethod;
 
     return descriptor;
   };

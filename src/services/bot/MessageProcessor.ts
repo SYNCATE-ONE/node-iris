@@ -6,15 +6,18 @@ import { safeJsonParseWithReviver, toSafeId } from '@/utils';
 import { Logger } from '@/utils/logger';
 import { EventManager } from './EventManager';
 
+export type ApiResolver = (connectionId: string) => IrisAPI | undefined;
+
 export class MessageProcessor {
   private eventManager: EventManager;
-  private api: IrisAPI;
+  private defaultApi: IrisAPI;
+  private apiResolver?: ApiResolver;
   private botId?: string;
   private logger: Logger;
 
   constructor(eventManager: EventManager, api: IrisAPI) {
     this.eventManager = eventManager;
-    this.api = api;
+    this.defaultApi = api;
     this.logger = new Logger('MessageProcessor');
   }
 
@@ -23,6 +26,25 @@ export class MessageProcessor {
    */
   setBotId(botId: string): void {
     this.botId = botId;
+  }
+
+  /**
+   * Set API resolver for multi-connection support
+   * @param resolver - Function that returns API instance for given connection ID
+   */
+  setApiResolver(resolver: ApiResolver): void {
+    this.apiResolver = resolver;
+  }
+
+  /**
+   * Get appropriate API for the given connection ID
+   */
+  private getApi(connectionId?: string): IrisAPI {
+    if (connectionId && this.apiResolver) {
+      const api = this.apiResolver(connectionId);
+      if (api) return api;
+    }
+    return this.defaultApi;
   }
 
   /**
@@ -42,12 +64,18 @@ export class MessageProcessor {
       // Ignore JSON parse errors
     }
 
-    const room = new Room(toSafeId(req.raw.chat_id), req.room, this.api);
+    // Get the connection ID from the request (added by MultiConnectionManager)
+    const connectionId = (req as any)._connectionId as string | undefined;
+
+    // Get the appropriate API for this connection
+    const api = this.getApi(connectionId);
+
+    const room = new Room(toSafeId(req.raw.chat_id), req.room, api);
 
     const sender = new User(
       toSafeId(req.raw.user_id),
       room.id,
-      this.api,
+      api,
       req.sender,
       this.botId ? toSafeId(this.botId) : undefined
     );
@@ -60,7 +88,15 @@ export class MessageProcessor {
       v
     );
 
-    const chat = new ChatContext(room, sender, message, req.raw, this.api);
+    // Create ChatContext with the correct API and connection ID
+    const chat = new ChatContext(
+      room,
+      sender,
+      message,
+      req.raw,
+      api,
+      connectionId
+    );
 
     await this.processChat(chat);
   }
